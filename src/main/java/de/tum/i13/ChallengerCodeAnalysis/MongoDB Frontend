@@ -1,0 +1,29 @@
+mongo_client = AsyncIOMotorClient(MONGODB_URI)
+db = mongo_client[MONGODB_DB]
+async def get_group_information(group_id):
+    return await db.groups.find_one({"_id":ObjectId(group_id)})
+async def get_evaluation_results():
+    pipeline = [
+        {"$match": {"benchmark_type": "Evaluation", "is_active": True, "timestamp": {"$gt": "2022-03-17T19:40:04.382088"}}},
+        {"$sort": {"group_id": 1, "timestamp": -1}},
+        {"$group": {
+            "_id": "$group_id",
+            "groupname": {"$first": "$groupname"},
+            "avg90percentile": {"$avg": {"$cond": [{"$gt": ["$q1_count", 100]}, "$q1_90percentile", None]}},
+            "avgthroughput": {"$avg": {"$cond": [{"$gt": ["$q1_count", 100]}, "$q1_throughput", None]}}
+        }},
+        {"$sort": {"_id": 1}}
+    ]
+    return await db.benchmarks.aggregate(pipeline).to_list(None)
+async def get_benchmarks_by_group(group_id):
+    cursor = db.benchmarks.find({"group_id": ObjectId(group_id)}).sort("timestamp", -1).limit(100)
+    return await cursor.to_list(length=1000)
+async def benchmark_get_is_active(group_id, benchmark_id):
+    return await db.benchmarks.find_one({"_id": benchmark_id, "group_id": group_id})
+async def get_benchmark(benchmark_id):
+    return await db.benchmarks.find_one({"_id": benchmark_id})
+async def get_benchmarkresults(benchmark_id):
+    return await db.benchmarkresults.find_one({"_id": benchmark_id})
+async def get_querymetrics(benchmark_id):
+    cursor = db.querymetrics.find({"benchmark_id": benchmark_id}).sort("batch_id", 1)
+    return await cursor.to_list(length=1000)

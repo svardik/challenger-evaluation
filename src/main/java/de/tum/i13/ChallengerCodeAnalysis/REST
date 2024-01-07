@@ -1,0 +1,250 @@
+@Path("/benchmark")
+public class RESTServer {
+    private final ArrayBlockingQueue<ToVerifyJSON> dbInserter;
+    private final IQueries q;
+    private final int durationEvaluationMinutes;
+    private final Random random;
+    final private ConcurrentHashMap<Long, BenchmarkStateJSON> benchmark;
+    private IDataStoreJSON store;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    public RESTServer(IDataStoreJSON store, ArrayBlockingQueue<ToVerifyJSON> dbInserter, IQueries q, int durationEvaluationMinutes) {
+        this.store = store;
+        this.dbInserter = dbInserter;
+        this.q = q;
+        this.durationEvaluationMinutes = durationEvaluationMinutes;
+        benchmark = new ConcurrentHashMap<>();
+        random = new Random(System.nanoTime());
+    }
+    @GET
+    @Path("/create-benchmark")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response createBenchmark(@QueryParam("token") String token,
+                                    @QueryParam("benchmarkType") String benchmarkType,
+                                    @QueryParam("benchmarkName") String benchmarkName,
+                                    @QueryParam("queries") List<String> queries) {
+       if(token==null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity("'token' query parameter missing")
+                    .build();
+        }
+        if(benchmarkType==null) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity("'benchmarkType' query parameter missing")
+                    .build();
+        }
+        if (benchmarkName==null){
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity("'benchmarkName' query parameter missing")
+                    .build();
+        }
+        if (queries==null || queries.isEmpty()){
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity("'queries' query parameter missing or empty")
+                    .build();
+        }
+        if(!isValid(benchmarkType)) {
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity("unsupported benchmarkType")
+                    .build();
+        }
+       try {
+            if(!q.checkIfGroupExists(token)) {
+                return Response.status(Response.Status.UNAUTHORIZED)
+                        .entity("token invalid")
+                        .build();
+            }
+        } catch (SQLException | ClassNotFoundException | InterruptedException throwables) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("database offline - plz. inform the challenge organizers")
+                    .build();
+        }
+        BenchmarkType bt = BenchmarkType.Test;
+        int batchSize = 1_000;
+        if(benchmarkType.equalsIgnoreCase("test")) {
+            bt = BenchmarkType.Test;
+            batchSize = 1_000;
+        } else if (benchmarkType.equalsIgnoreCase("verification")) {
+            bt = BenchmarkType.Verification;
+        } else if (benchmarkType.equalsIgnoreCase("evaluation")){
+            bt = BenchmarkType.Evaluation;
+            batchSize = 1_000;
+        }
+        long benchmarkId = Math.abs(random.nextLong());
+        try {
+            UUID groupId = q.getGroupIdFromToken(token);
+            q.insertBenchmarkStarted(benchmarkId, groupId, benchmarkName, batchSize, bt);
+        } catch (SQLException | ClassNotFoundException | InterruptedException throwables) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("database offline - plz. inform the challenge organizers")
+                    .build();
+        }
+        BenchmarkStateJSON bms = new BenchmarkStateJSON(this.dbInserter);
+        bms.setToken(token);
+        bms.setBenchmarkId(benchmarkId);
+        bms.setToken(token);
+        bms.setBenchmarkType(bt);
+        bms.setBenchmarkName(benchmarkName);
+        bms.setQ1(queries.contains("q1"));
+        bms.setQ2(queries.contains("q2"));
+        Instant stopTime = Instant.now().plus(durationEvaluationMinutes, ChronoUnit.MINUTES);
+        if(bt == BenchmarkType.Evaluation) {
+            var bi = new BatchIteratorJSON(this.store, stopTime);
+            bms.setDatasource(bi);
+        } else {
+            var bi = new BatchIteratorJSON(this.store, stopTime);
+            bms.setDatasource(bi);
+        }
+       this.benchmark.put(benchmarkId, bms);
+        return Response.status(Response.Status.OK)
+                .entity("{\"benchmark_id\": " + benchmarkId + "}")
+                .build();
+    }
+    @POST
+    @Path("/{benchmark_id}/start-benchmark/")
+    public Response startBenchmark(@PathParam("benchmark_id") Long benchmarkId) {
+        if(!this.benchmark.containsKey(benchmarkId)) {
+                return Response.status(Response.Status.NOT_FOUND)
+                        .entity("Benchmark not created")
+                        .build();
+        }
+        this.benchmark.computeIfPresent(benchmarkId, (k, b) -> {
+            b.setIsStarted(true);
+            b.startBenchmark(System.nanoTime());
+            return b;
+        });
+        return Response.status(Response.Status.CREATED)
+                        .build();
+    }
+    @GET
+    @Path("/{benchmark_id}/next-batch")
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response nextBatch(@PathParam("benchmark_id") Long benchmarkId) {
+        if(!this.benchmark.containsKey(benchmarkId)) {
+            return Response.status(Response.Status.NOT_FOUND)
+                    .entity("Benchmark not created")
+                    .build();
+        }
+        if(!this.benchmark.get(benchmarkId).getIsStarted()) {
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity("Benchmark not started, call startBenchmark first")
+                    .build();
+        }
+        AtomicReference<BatchJSON> batchRef = new AtomicReference<>();
+        this.benchmark.computeIfPresent(benchmarkId, (k, b) -> {
+            try {
+                if(b.getBenchmarkType() == BenchmarkType.Evaluation) { //this comes from memory and is too fast
+                    batchRef.set(b.getNextBatch(benchmarkId));
+                    nextBatchValidation.inc();
+                } else {
+                    Histogram.Timer batchReadTimer = batchReadLatency.startTimer();
+                    batchRef.set(b.getNextBatch(benchmarkId));
+                    batchReadTimer.observeDuration();
+                    nextBatchTest.inc();
+                }
+            } catch (RocksDBException|InterruptedException e) {
+                e.printStackTrace();
+                return null;
+            }
+            return b;
+        });
+        BatchJSON acquired_batch = batchRef.getAcquire();
+        if(acquired_batch == null) {
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("Could not get next batch, plz. let the DEBS challenge organizers know that they should fix this bug, .. IMMEDIATELY. thanks!")
+                    .build();
+        }
+        try {
+            return Response.status(Response.Status.OK)
+                    .entity(objectMapper.writeValueAsString(acquired_batch))
+                    .build();
+        } catch (JsonProcessingException e) {
+            e.printStackTrace();
+            return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
+                    .entity("JSON serialization of batch failed")
+                    .build();
+        }
+    }
+    @POST
+    @Path("/{benchmark_id}/result-q1")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response postBatchResultQ1(@PathParam("benchmark_id") Long benchmarkId, String jsonBody) {
+        long nanoTime = System.nanoTime();
+        if(!this.benchmark.containsKey(benchmarkId)) {
+            return Response.status(Response.Status.NOT_FOUND)
+                    .entity("Benchmark not created")
+                    .build();
+        }
+        if(!this.benchmark.get(benchmarkId).getIsStarted()) {
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity("Benchmark not started, call POST '/<benchmarkId>/start-benchmark' first")
+                    .build();
+        }
+        try {
+            ResultQ1JSON resultQ1 = objectMapper.readValue(jsonBody, ResultQ1JSON.class);;
+            this.benchmark.computeIfPresent(benchmarkId, (k, b) -> {
+                b.resultsQ1(resultQ1, nanoTime);
+                return b;
+            });
+        } catch (JsonProcessingException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity("Result in incorrect json format")
+                    .build();
+        }
+        return Response.status(Response.Status.CREATED).build();
+    }
+    @POST
+    @Path("/{benchmark_id}/result-q2")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response postBatchResultQ2(@PathParam("benchmark_id") Long benchmarkId, String jsonBody) {
+        long nanoTime = System.nanoTime();
+        if(!this.benchmark.containsKey(benchmarkId)) {
+            return Response.status(Response.Status.NOT_FOUND)
+                    .entity("Benchmark not created")
+                    .build();
+        }
+        if(!this.benchmark.get(benchmarkId).getIsStarted()) {
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity("Benchmark not started, call POST '/<benchmarkId>/start-benchmark' first")
+                    .build();
+        }
+        try {
+            ResultQ2JSON resultQ2 = objectMapper.readValue(jsonBody, ResultQ2JSON.class);;
+            this.benchmark.computeIfPresent(benchmarkId, (k, b) -> {
+                b.resultsQ2(resultQ2, nanoTime);
+                return b;
+            });
+        } catch (JsonProcessingException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                    .entity("Result in incorrect json format")
+                    .build();
+        }
+        return Response.status(Response.Status.CREATED).build();
+    }
+    @POST
+    @Path("/{benchmark_id}/end-benchmark")
+    public Response endBenchmark(@PathParam("benchmark_id") Long benchmarkId) {
+        long nanoTime = System.nanoTime();
+        if(!this.benchmark.containsKey(benchmarkId)) {
+            return Response.status(Response.Status.NOT_FOUND)
+                    .entity("Benchmark not created")
+                    .build();
+        }
+        if(!this.benchmark.get(benchmarkId).getIsStarted()) {
+            return Response.status(Response.Status.PRECONDITION_FAILED)
+                    .entity("Benchmark not started, call POST '/<benchmarkId>/start-benchmark' first")
+                    .build();
+        }
+        AtomicBoolean found = new AtomicBoolean(false);
+        this.benchmark.computeIfPresent(benchmarkId, (k, b) -> {
+            b.endBenchmark(benchmarkId, nanoTime);
+            found.set(true);
+
+            //Logger.info("Ended benchmark: " + b.toString());
+            return b;
+        });
+        if(found.get()) {
+            this.benchmark.remove(benchmarkId);
+        }
+        return Response.status(Response.Status.CREATED).build();
+    }
+}

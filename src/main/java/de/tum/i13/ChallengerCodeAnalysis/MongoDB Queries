@@ -1,0 +1,112 @@
+public class MongoQueries implements IQueries {
+    @Override
+    public DB getDb() {
+        return null;
+    }
+    @Override
+    public boolean checkIfGroupExists(String token) {
+        MongoDatabase db = MongoDBManager.getDatabase();
+        try {
+            MongoCollection<Document> groupsCollection = db.getCollection("groups");
+            Document doc = groupsCollection.find(eq("groupapikey", token))
+                    .first();
+            return doc !=null;
+        } finally {
+        }
+    }
+    @Override
+    public UUID getGroupIdFromToken(String token) {
+        MongoDatabase db = MongoDBManager.getDatabase();
+        try {
+            MongoCollection<Document> groupsCollection = db.getCollection("groups");
+            Document doc = groupsCollection.find(eq("groupapikey", token))
+                    .first();
+            if (doc!=null) {
+                ObjectId id = doc.get("_id", ObjectId.class);
+                return getUUIDFromByteArray(Arrays.copyOf(id.toByteArray(), 16));
+            }
+            return null;
+        } finally {
+        }
+    }
+    @Override
+    public void insertBenchmarkStarted(long benchmarkId, UUID groupId, String benchmarkName, int batchSize, BenchmarkType bt) {
+        MongoDatabase db = MongoDBManager.getDatabase();
+        try {
+            MongoCollection<Document> benchmarksCollection = db.getCollection("benchmarks");
+            Document benchmarkDocument = new Document()
+                    .append("_id", benchmarkId)
+                    .append("group_id", new ObjectId(uuidToBigEndianBytes(groupId)))
+                    .append("timestamp", new Timestamp(System.currentTimeMillis()))
+                    .append("benchmark_name", benchmarkName)
+                    .append("benchmark_type", bt.toString())
+                    .append("batchsize", batchSize);
+            benchmarksCollection.insertOne(benchmarkDocument);
+            endMeasurement("insertBenchmarkStartedMongo");
+        } finally {
+        }
+    }
+    @Override
+    public void insertLatency(LatencyMeasurement lm) {
+        MongoDatabase db = MongoDBManager.getDatabase();
+        try {
+            MongoCollection<Document> queryMetricsCollection = db.getCollection("querymetrics");
+            Document latencyDocument = new Document()
+                    .append("benchmark_id", lm.getBenchmarkId())
+                    .append("batch_id", lm.getBatchId())
+                    .append("starttime", lm.getStartTime());
+            if (lm.hasQ1Results()) {
+                long q1resultTime = lm.getQ1ResultTime();
+                long q1Latency = q1resultTime - lm.getStartTime();
+                latencyDocument.append("q1resulttime", q1resultTime)
+                        .append("q1latency", q1Latency);
+            } else {
+                latencyDocument.append("q1resulttime", null)
+                        .append("q1latency", null);
+            }
+            if (lm.hasQ2Results()) {
+                long q2resultTime = lm.getQ2ResultTime();
+                long q2Latency = q2resultTime - lm.getStartTime();
+                latencyDocument.append("q2resulttime", q2resultTime)
+                        .append("q2latency", q2Latency);
+            } else {
+                latencyDocument.append("q2resulttime", null)
+                        .append("q2latency", null);
+            }
+            queryMetricsCollection.insertOne(latencyDocument);
+        } finally {
+        }
+    }
+    @Override
+    public void insertBenchmarkResult(BenchmarkResult br, String s) {
+        MongoDatabase db = MongoDBManager.getDatabase();
+        try {
+            MongoCollection<Document> benchmarkResultsCollection = db.getCollection("benchmarkresults");
+            Document resultDocument = new Document()
+                    .append("_id", br.getBenchmarkId())
+                    .append("duration_sec", br.getSeconds())
+                    .append("q1_count", br.getQ1_count())
+                    .append("q1_throughput", br.getQ1Throughput())
+                    .append("q1_90percentile", br.getQ1_90Percentile())
+                    .append("q2_count", br.getQ2_count())
+                    .append("q2_throughput", br.getQ2Throughput())
+                    .append("q2_90percentile", br.getQ2_90Percentile())
+                    .append("summary", s);
+            benchmarkResultsCollection.insertOne(resultDocument);
+        } finally {
+        }
+    }
+    public static UUID getUUIDFromByteArray(byte[] bytes) {
+        ByteBuffer bb = ByteBuffer.wrap(bytes);
+        long high = bb.getLong();
+        long low = bb.getLong();
+        return new UUID(high, low);
+    }
+    public static byte[] uuidToBigEndianBytes(UUID uuid) {
+        ByteBuffer bb = ByteBuffer.wrap(new byte[16]);
+        bb.putLong(uuid.getMostSignificantBits());
+        bb.putLong(uuid.getLeastSignificantBits());
+        byte[] ba = bb.array();
+        return Arrays.copyOfRange(ba,0,12);
+    }
+}

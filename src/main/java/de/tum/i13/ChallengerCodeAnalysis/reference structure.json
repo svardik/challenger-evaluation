@@ -1,0 +1,77 @@
+{
+  "groups": [
+    {
+      "_id": {
+        "$oid": "6576db7eb721ad00b6438aca"
+      },
+      "groupname": "group-0",
+      "password": "c8fb3e8874fe9705857e827b0532bfe6",
+      "groupemail": "matej.svaral@tum.de",
+      "groupnick": "group-0",
+      "groupapikey": "94269123013"
+    }
+  ],
+  "benchmarks": [
+    {
+      "_id": {
+        "$numberLong": "1"
+      },
+      "group_id": {
+        "$oid": "6576db7eb721ad00b6438aca"
+      },
+      "timestamp": {
+        "$date": 1702288254859
+      },
+      "benchmark_name": "benchmark-1",
+      "benchmark_type": "Evaluation",
+      "batchsize": 100
+    }
+  ],
+  "benchmarkresults": [
+    {
+      "_id": {
+        "$numberLong": "1"
+      },
+      "duration_sec": 42.0,
+      "q1_count": {
+        "$numberLong": "100"
+      },
+      "q1_throughput": 0.40173914883861817,
+      "q1_90percentile": 0.068295065366343,
+      "q2_count": {
+        "$numberLong": "100"
+      },
+      "q2_throughput": 0.2907140284192187,
+      "q2_90percentile": 0.012975342284835323,
+      "summary": "dummy data"
+    }
+  ],
+  "querymetrics": [
+    {
+      "_id": {
+        "$oid": "6576db7eb721ad00b6438acb"
+      },
+      "benchmark_id": {
+        "$numberLong": "1"
+      },
+      "batch_id": {
+        "$numberLong": "0"
+      },
+      "starttime": {
+        "$numberLong": "-615958435929483393"
+      },
+      "q1resulttime": {
+        "$numberLong": "-3459000388379699497"
+      },
+      "q1latency": {
+        "$numberLong": "-6620556198563020340"
+      },
+      "q2resulttime": {
+        "$numberLong": "-1455849816555223063"
+      },
+      "q2latency": {
+        "$numberLong": "388824850964822287"
+      }
+    }
+  ]
+}

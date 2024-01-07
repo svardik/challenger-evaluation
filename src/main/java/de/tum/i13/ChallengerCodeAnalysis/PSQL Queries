@@ -1,0 +1,172 @@
+public class Queries implements IQueries {
+    private final DB conn;
+    public Queries(DB connectionPool) {
+        this.conn = connectionPool;
+    }
+    @Override
+    public DB getDb() {
+        return this.conn;
+    }
+    @Override
+    public boolean checkIfGroupExists(String token) throws SQLException, ClassNotFoundException, InterruptedException {
+        try(PreparedStatement preparedStatement = this.conn
+                .getConnection()
+                .prepareStatement("SELECT count(*) AS rowcount FROM groups where groupapikey = ?")) {
+            preparedStatement.setString(1, token);
+            try(ResultSet r = preparedStatement.executeQuery()) {
+                r.next();
+                int count = r.getInt("rowcount");
+                return count == 1;
+            }
+        }
+    }
+    @Override
+    public UUID getGroupIdFromToken(String token) throws SQLException, ClassNotFoundException, InterruptedException {
+        try(PreparedStatement preparedStatement = this.conn
+                .getConnection()
+                .prepareStatement("SELECT id AS group_id FROM groups where groupapikey = ?")) {
+            preparedStatement.setString(1, token);
+            try(ResultSet r = preparedStatement.executeQuery()) {
+                r.next();
+                return r.getObject("group_id", UUID.class);
+            }
+        }
+    }
+    @Override
+    public void insertBenchmarkStarted(long benchmarkId, UUID groupId, String benchmarkName, int batchSize, BenchmarkType bt) throws SQLException, ClassNotFoundException, InterruptedException {
+        try(PreparedStatement pStmt = this.conn
+                .getConnection()
+                .prepareStatement("INSERT INTO benchmarks(" +
+                        "id, group_id, \"timestamp\", benchmark_name, benchmark_type, batchsize) " +
+                        "VALUES (?, ?, ?, ?, ?, ?)")) {
+            pStmt.setLong(1, benchmarkId);
+            pStmt.setObject(2, groupId);
+            pStmt.setTimestamp(3, Timestamp.from(Instant.now()));
+            pStmt.setString(4, benchmarkName);
+            pStmt.setString(5, bt.toString());
+            pStmt.setLong(6, batchSize);
+            pStmt.execute();
+        }
+    }
+    @Override
+    public void insertLatencyMeasurementStats(long benchmarkId, double averageLatency) throws SQLException, ClassNotFoundException, InterruptedException {
+        try(PreparedStatement pStmt = this.conn
+                .getConnection()
+                .prepareStatement("DELETE FROM latencymeasurement where benchmark_id = ?")) {
+            pStmt.setLong(1, benchmarkId);
+            pStmt.execute();
+        }
+        try(PreparedStatement pStmt = this.conn
+                .getConnection()
+                .prepareStatement("INSERT INTO latencymeasurement(" +
+                                "benchmark_id, \"timestamp\", avglatency) " +
+                                "VALUES (?, ?, ?)")) {
+            pStmt.setLong(1, benchmarkId);
+            pStmt.setTimestamp(2, Timestamp.from(Instant.now()));
+            pStmt.setDouble(3, averageLatency);
+            pStmt.execute();
+        }
+    }
+    @Override
+    public void insertLatency(LatencyMeasurement lm) throws SQLException, ClassNotFoundException, InterruptedException {
+        try(PreparedStatement pStmt = this.conn
+                .getConnection()
+                .prepareStatement("INSERT INTO querymetrics(" +
+                                "benchmark_id, batch_id, starttime, q1resulttime, q1latency, q2resulttime, q2latency) " +
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+            pStmt.setLong(1, lm.getBenchmarkId());
+            pStmt.setLong(2, lm.getBatchId());
+            long startTime = lm.getStartTime();
+            pStmt.setLong(3, startTime);
+            if(lm.hasQ1Results()) {
+                long q1resultTime = lm.getQ1ResultTime();
+                long q1Latency = q1resultTime - startTime;
+                pStmt.setLong(4, q1resultTime);
+                pStmt.setLong(5, q1Latency);
+            } else {
+                pStmt.setLong(4, java.sql.Types.NULL);
+                pStmt.setLong(5, java.sql.Types.NULL);
+            }
+            if(lm.hasQ2Results()) {
+                long q2resultTime = lm.getQ2ResultTime();
+                long q2Latency = q2resultTime - startTime;
+                pStmt.setLong(6, q2resultTime);
+                pStmt.setLong(7, q2Latency);
+            } else {
+                pStmt.setNull(6, java.sql.Types.NULL);
+                pStmt.setLong(7, java.sql.Types.NULL);
+            }
+            pStmt.execute();
+        }
+    }
+    @Override
+    public void insertBenchmarkResult(BenchmarkResult br, String s) throws SQLException, ClassNotFoundException, InterruptedException {
+        try(PreparedStatement pStmt = this.conn
+                .getConnection()
+                .prepareStatement("INSERT INTO public.benchmarkresults(" +
+                "id, duration_sec, q1_count, q1_throughput, q1_90percentile, q2_count, q2_throughput, q2_90percentile, summary) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+            pStmt.setLong(1, br.getBenchmarkId());
+            pStmt.setDouble(2, br.getSeconds());
+            pStmt.setLong(3, br.getQ1_count());
+            pStmt.setDouble(4, br.getQ1Throughput());
+            pStmt.setDouble(5, br.getQ1_90Percentile());
+            pStmt.setLong(6, br.getQ2_count());
+            pStmt.setDouble(7, br.getQ2Throughput());
+            pStmt.setDouble(8, br.getQ2_90Percentile());
+            pStmt.setString(9, s);
+            pStmt.execute();
+        }
+    }
+}
+
+
+
+
+public class DB {
+    private Connection connection;
+    private String url;
+    private final Object lock = new Object();
+    private final String checkQuery = "SELECT 1";
+    public DB(String url) throws SQLException, ClassNotFoundException {
+        this.url = url;
+        this.connection = newConnection();
+    }
+    private Connection newConnection() throws ClassNotFoundException, SQLException {
+        Class.forName("org.postgresql.Driver");
+        return DriverManager.getConnection(url);
+    }
+    private Boolean testConnection() throws SQLException {
+        try(PreparedStatement prepareStatement = this.connection.prepareStatement(this.checkQuery)) {
+            return true;
+        }
+    }
+    public Connection getConnection() throws InterruptedException, ClassNotFoundException {
+        try { //happy path, return the connection if valid
+            if(this.testConnection()) {
+                return this.connection;
+            }
+        } catch (SQLException ex) {
+            synchronized(this.lock) {
+                try {
+                    if(testConnection()) {
+                        return this.connection;
+                    }
+                } catch(SQLException innerEx) {
+                    for(int i = 1; i < 31; ++i) {
+                        try {
+                            this.connection = newConnection();
+                            if(testConnection()) {
+                                return this.connection;
+                            }
+                        } catch(SQLException innerInnerEx) {
+                        }
+                        int millisecondsWait = 1000 * i;
+                        Thread.sleep(millisecondsWait);
+                    }
+                }
+            }
+        }
+        return connection;
+    }
+}
